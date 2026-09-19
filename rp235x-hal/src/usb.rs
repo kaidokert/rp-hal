@@ -83,10 +83,9 @@ struct Inner {
     out_endpoints: [Option<Endpoint>; 16],
     next_offset: u16,
     read_setup: bool,
-    pll: UsbClock,
 }
 impl Inner {
-    fn new(ctrl_reg: pac::USB, ctrl_dpram: pac::USB_DPRAM, pll: UsbClock) -> Self {
+    fn new(ctrl_reg: pac::USB, ctrl_dpram: pac::USB_DPRAM) -> Self {
         Self {
             ctrl_reg,
             ctrl_dpram,
@@ -94,7 +93,6 @@ impl Inner {
             out_endpoints: Default::default(),
             next_offset: 0,
             read_setup: false,
-            pll,
         }
     }
 
@@ -345,12 +343,25 @@ impl Inner {
     }
 }
 
-/// Usb bus
-pub struct UsbBus {
+/// Marker for a USB clock and reset domain prepared outside this HAL instance.
+///
+/// Unlike [`UsbClock`], this marker does not grant access to the clock controller.
+/// It records that the caller of [`UsbBus::from_prepared_peripherals`] accepted
+/// responsibility for keeping the USB clock and reset state valid.
+pub struct PreparedUsbDomain;
+
+/// USB bus.
+///
+/// `Ownership` records who owns the USB clock/reset lifecycle. The default
+/// [`UsbClock`] form preserves the original `new`/`free` API. A
+/// [`PreparedUsbDomain`] bus is used when an earlier boot stage retains that
+/// lifecycle ownership.
+pub struct UsbBus<Ownership = UsbClock> {
     inner: Mutex<RefCell<Inner>>,
+    ownership: Ownership,
 }
 
-impl UsbBus {
+impl UsbBus<UsbClock> {
     /// Create new usb bus struct and bring up usb as device.
     pub fn new(
         ctrl_reg: pac::USB,
@@ -362,6 +373,64 @@ impl UsbBus {
         ctrl_reg.reset_bring_down(resets);
         ctrl_reg.reset_bring_up(resets);
 
+        Self::initialize(ctrl_reg, ctrl_dpram, pll, force_vbus_detect_bit)
+    }
+
+    /// Stop and free the USB resources.
+    pub fn free(self, resets: &mut pac::RESETS) -> (pac::USB, pac::USB_DPRAM, UsbClock) {
+        critical_section::with(|_cs| {
+            let inner = self.inner.into_inner().into_inner();
+
+            inner.ctrl_reg.reset_bring_down(resets);
+
+            (inner.ctrl_reg, inner.ctrl_dpram, self.ownership)
+        })
+    }
+}
+
+impl UsbBus<PreparedUsbDomain> {
+    /// Construct a USB bus whose clock and reset domain were prepared earlier.
+    ///
+    /// This supports ownership handoff from a boot stage that retains the clock
+    /// and reset controllers to an isolated runtime that owns only `USB` and
+    /// `USB_DPRAM`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    ///
+    /// - the USB clock is enabled, stable, and running at 48 MHz;
+    /// - the USB peripheral has been reset and released from reset;
+    /// - the clock and reset configuration remains valid for the returned bus;
+    /// - `ctrl_reg` and `ctrl_dpram` are exclusively owned by the caller; and
+    /// - no other core, interrupt, or execution context accesses the USB bus.
+    pub unsafe fn from_prepared_peripherals(
+        ctrl_reg: pac::USB,
+        ctrl_dpram: pac::USB_DPRAM,
+        force_vbus_detect_bit: bool,
+    ) -> Self {
+        Self::initialize(
+            ctrl_reg,
+            ctrl_dpram,
+            PreparedUsbDomain,
+            force_vbus_detect_bit,
+        )
+    }
+
+    /// Release the USB peripherals without changing their clock or reset state.
+    pub fn free_prepared(self) -> (pac::USB, pac::USB_DPRAM) {
+        let inner = self.inner.into_inner().into_inner();
+        (inner.ctrl_reg, inner.ctrl_dpram)
+    }
+}
+
+impl<Ownership> UsbBus<Ownership> {
+    fn initialize(
+        ctrl_reg: pac::USB,
+        ctrl_dpram: pac::USB_DPRAM,
+        ownership: Ownership,
+        force_vbus_detect_bit: bool,
+    ) -> Self {
         unsafe {
             let raw_ctrl_reg =
                 core::slice::from_raw_parts_mut(pac::USB::ptr() as *mut u32, 1 + 0x98 / 4);
@@ -390,7 +459,8 @@ impl UsbBus {
         });
 
         Self {
-            inner: Mutex::new(RefCell::new(Inner::new(ctrl_reg, ctrl_dpram, pll))),
+            inner: Mutex::new(RefCell::new(Inner::new(ctrl_reg, ctrl_dpram))),
+            ownership,
         }
     }
 
@@ -404,20 +474,9 @@ impl UsbBus {
                 .modify(|_, w| w.resume().set_bit());
         });
     }
-
-    /// Stop and free the Usb resources
-    pub fn free(self, resets: &mut pac::RESETS) -> (pac::USB, pac::USB_DPRAM, UsbClock) {
-        critical_section::with(|_cs| {
-            let inner = self.inner.into_inner().into_inner();
-
-            inner.ctrl_reg.reset_bring_down(resets);
-
-            (inner.ctrl_reg, inner.ctrl_dpram, inner.pll)
-        })
-    }
 }
 
-impl UsbBusTrait for UsbBus {
+impl<Ownership: Send + Sync> UsbBusTrait for UsbBus<Ownership> {
     fn alloc_ep(
         &mut self,
         ep_dir: UsbDirection,
