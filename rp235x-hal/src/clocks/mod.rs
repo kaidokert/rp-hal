@@ -72,7 +72,7 @@
 //!
 //! See [Chapter 8](https://rptl.io/rp2350-datasheet#section_clocks) for more details.
 
-use core::{convert::Infallible, marker::PhantomData};
+use core::{convert::Infallible, marker::PhantomData, num::NonZeroU32};
 use fugit::{HertzU32, RateExtU32};
 
 use crate::{
@@ -742,9 +742,43 @@ pub fn init_clocks_and_plls(
 }
 
 // Calculates (numerator<<16)/denominator.
-fn fractional_div(numerator: u32, denominator: u32) -> Option<u32> {
+fn fractional_div(numerator: u32, denominator: NonZeroU32) -> Option<NonZeroU32> {
     let numerator: u64 = u64::from(numerator) * 65536;
-    let denominator: u64 = u64::from(denominator);
+    let denominator: u64 = u64::from(denominator.get());
     let result = numerator / denominator;
-    result.try_into().ok()
+    let result: u32 = result.try_into().ok()?;
+    NonZeroU32::new(result)
+}
+
+fn clock_divider(source_hz: u32, requested_hz: u32) -> Result<NonZeroU32, ClockError> {
+    let requested_hz = NonZeroU32::new(requested_hz).ok_or(ClockError::FrequencyTooLow)?;
+    if requested_hz.get() > source_hz {
+        return Err(ClockError::CantIncreaseFreq);
+    }
+
+    fractional_div(source_hz, requested_hz).ok_or(ClockError::FrequencyTooLow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clock_divider, fractional_div, ClockError};
+    use core::num::NonZeroU32;
+
+    #[test]
+    fn zero_requested_frequency_is_rejected() {
+        assert_eq!(
+            clock_divider(120_000_000, 0),
+            Err(ClockError::FrequencyTooLow)
+        );
+    }
+
+    #[test]
+    fn fractional_divider_round_trips_common_clock_rate() {
+        let divider = clock_divider(120_000_000, 48_000_000).unwrap();
+        assert_eq!(divider.get(), 163_840);
+        assert_eq!(
+            fractional_div(120_000_000, divider),
+            NonZeroU32::new(48_000_000)
+        );
+    }
 }

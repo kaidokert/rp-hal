@@ -183,17 +183,13 @@ macro_rules! clock {
                 fn configure_clock<S: ValidSrc<$name>>(&mut self, src: &S, freq: HertzU32) -> Result<(), ClockError>{
                     let src_freq: HertzU32 = src.get_freq().into();
 
-                    if freq.gt(&src_freq){
-                        return Err(ClockError::CantIncreaseFreq);
-                    }
-
-                    let div = fractional_div(src_freq.to_Hz(), freq.to_Hz()).ok_or(ClockError::FrequencyTooLow)?;
+                    let div = clock_divider(src_freq.to_Hz(), freq.to_Hz())?;
 
                     // If increasing divisor, set divisor before source. Otherwise set source
                     // before divisor. This avoids a momentary overspeed when e.g. switching
                     // to a faster source and increasing divisor to compensate.
-                    if div > self.get_div() {
-                        self.set_div(div);
+                    if div.get() > self.get_div() {
+                        self.set_div(div.get());
                     }
 
 
@@ -215,11 +211,14 @@ macro_rules! clock {
 
                     // Now that the source is configured, we can trust that the user-supplied
                     // divisor is a safe value.
-                    self.set_div(div);
+                    self.set_div(div.get());
 
                     // Store the configured frequency
                     use fugit::RateExtU32;
-                    self.frequency = fractional_div(src_freq.to_Hz(), div).ok_or(ClockError::FrequencyTooHigh)?.Hz();
+                    self.frequency = fractional_div(src_freq.to_Hz(), div)
+                        .ok_or(ClockError::FrequencyTooHigh)?
+                        .get()
+                        .Hz();
 
                     Ok(())
                 }
@@ -334,17 +333,13 @@ macro_rules! stoppable_clock {
                 fn configure_clock<S: ValidSrc<$name>>(&mut self, src: &S, freq: HertzU32) -> Result<(), ClockError>{
                     let src_freq: HertzU32 = src.get_freq().into();
 
-                    if freq.gt(&src_freq){
-                        return Err(ClockError::CantIncreaseFreq);
-                    }
-
-                    let div = fractional_div(src_freq.to_Hz(), freq.to_Hz()).ok_or(ClockError::FrequencyTooLow)?;
+                    let div = clock_divider(src_freq.to_Hz(), freq.to_Hz())?;
 
                     // If increasing divisor, set divisor before source. Otherwise set source
                     // before divisor. This avoids a momentary overspeed when e.g. switching
                     // to a faster source and increasing divisor to compensate.
-                    if div > self.get_div() {
-                        self.set_div(div);
+                    if div.get() > self.get_div() {
+                        self.set_div(div.get());
                     }
 
                     // If no glitchless mux, cleanly stop the clock to avoid glitches
@@ -372,11 +367,14 @@ macro_rules! stoppable_clock {
 
                     // Now that the source is configured, we can trust that the user-supplied
                     // divisor is a safe value.
-                    self.set_div(div);
+                    self.set_div(div.get());
 
                     // Store the configured frequency
                     use fugit::RateExtU32;
-                    self.frequency = fractional_div(src_freq.to_Hz(), div).ok_or(ClockError::FrequencyTooHigh)?.Hz();
+                    self.frequency = fractional_div(src_freq.to_Hz(), div)
+                        .ok_or(ClockError::FrequencyTooHigh)?
+                        .get()
+                        .Hz();
 
                     Ok(())
                 }
